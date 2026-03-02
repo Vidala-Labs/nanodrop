@@ -37,7 +37,9 @@ defmodule Nanodrop.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{}
+      links: %{
+        "GitHub" => "https://github.com/Vidala-Labs/nanodrop"
+      }
     ]
   end
 end
