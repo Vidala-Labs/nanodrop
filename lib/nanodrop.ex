@@ -143,9 +143,10 @@ defmodule Nanodrop do
   @impl true
   def init(opts) do
     device_info = Keyword.get(opts, :device)
+
     with {:ok, device} <- Device.open(device_info),
          {:ok, state} <- initialize_device(device) do
-        {:ok, state}
+      {:ok, state}
     else
       {:error, reason} ->
         {:stop, reason}
