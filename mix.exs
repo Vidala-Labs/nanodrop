@@ -6,12 +6,16 @@ defmodule Nanodrop.MixProject do
       app: :nanodrop,
       version: "0.1.0",
       elixir: "~> 1.15",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description: description(),
       package: package()
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/_support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   def application do
     [
