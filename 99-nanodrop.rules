@@ -1,0 +1,11 @@
+# udev rules for NanoDrop 1000 / Ocean Optics USB2000 spectrometers
+# Copy this file to /etc/udev/rules.d/ and run:
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+# Then unplug and replug the device.
+
+# Ocean Optics USB2000 (used in NanoDrop 1000)
+SUBSYSTEM=="usb", ATTR{idVendor}=="2457", ATTR{idProduct}=="1002", MODE="0666"
+
+# Alternative: restrict to a specific group (e.g., plugdev)
+# SUBSYSTEM=="usb", ATTR{idVendor}=="2457", ATTR{idProduct}=="1002", GROUP="plugdev", MODE="0660"
