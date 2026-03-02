@@ -1,5 +1,6 @@
 # Nanodrop
 
+[![CI](https://github.com/Vidala-Labs/nanodrop/actions/workflows/ci.yml/badge.svg)](https://github.com/Vidala-Labs/nanodrop/actions/workflows/ci.yml)
 [![Hex.pm](https://img.shields.io/hexpm/v/nanodrop.svg)](https://hex.pm/packages/nanodrop)
 [![Docs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/nanodrop)
 [![License](https://img.shields.io/hexpm/l/nanodrop.svg)](https://github.com/Vidala-Labs/nanodrop/blob/main/LICENSE)
