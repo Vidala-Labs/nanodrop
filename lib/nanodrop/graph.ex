@@ -7,6 +7,8 @@ defmodule Nanodrop.Graph do
 
   alias Nanodrop.Mode
   alias Nanodrop.Spectrum
+  alias Vix.Vips.Image
+  alias Vix.Vips.MutableImage
 
   @chart_width 300
   @chart_height 200
@@ -75,13 +77,61 @@ defmodule Nanodrop.Graph do
     :ok
   end
 
-  defp save_png(svg, filename, results) do
-    alias Vix.Vips.{Image, MutableImage}
+  @doc """
+  Generates a PNG binary with embedded metadata.
 
+  Returns `{:ok, png_binary}` or `{:error, reason}`.
+
+  The PNG includes spectrum data as JSON in the png-comment chunk.
+  Additional metadata can be passed in the `metadata` option.
+
+  ## Options
+
+  - `:metadata` - Additional metadata map to merge into the embedded JSON
+
+  ## Example
+
+      result = %{
+        sample: 1,
+        wavelengths: [...],
+        absorbance: [...],
+        a260: 1.5,
+        a280: 0.8,
+        ratio: 1.87,
+        concentration: 75.0
+      }
+      {:ok, png} = Nanodrop.Graph.generate_png([result], %Nanodrop.Mode.DNA{},
+        metadata: %{timestamp: "2026-04-11T10:30:00Z", device_serial: "ABC123"}
+      )
+  """
+  @spec generate_png(list(map()), struct(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def generate_png(results, mode \\ %Nanodrop.Mode.DNA{}, opts \\ []) do
+    svg = generate(results, mode)
+    extra_metadata = Keyword.get(opts, :metadata, %{})
+
+    try do
+      {:ok, image} = Image.new_from_buffer(svg)
+
+      # Embed spectrum data as JSON in PNG comment
+      spectrum_data = encode_spectrum_metadata(results, extra_metadata)
+
+      {:ok, image_with_meta} =
+        Image.mutate(image, fn mut_image ->
+          :ok = MutableImage.set(mut_image, "png-comment-0-Spectrum", :gchararray, spectrum_data)
+        end)
+
+      {:ok, png_binary} = Image.write_to_buffer(image_with_meta, ".png")
+      {:ok, png_binary}
+    rescue
+      e -> {:error, e}
+    end
+  end
+
+  defp save_png(svg, filename, results) do
     {:ok, image} = Image.new_from_buffer(svg)
 
     # Embed spectrum data as JSON in PNG comment
-    spectrum_data = encode_spectrum_metadata(results)
+    spectrum_data = encode_spectrum_metadata(results, %{})
 
     {:ok, image_with_meta} =
       Image.mutate(image, fn mut_image ->
@@ -91,24 +141,25 @@ defmodule Nanodrop.Graph do
     :ok = Image.write_to_file(image_with_meta, filename)
   end
 
-  defp encode_spectrum_metadata(results) do
-    results
-    |> Enum.map(fn result ->
-      spectrum =
-        result.wavelengths
-        |> Enum.map(&to_string/1)
-        |> Enum.zip(result.absorbance)
-        |> Map.new()
+  defp encode_spectrum_metadata(results, extra_metadata) do
+    # Build data array from first result (single measurement)
+    result = List.first(results)
 
-      %{
-        sample: result.sample,
-        a260: result.a260,
-        a280: result.a280,
-        ratio: result.ratio,
-        concentration_ng_ul: result.concentration,
-        spectrum: spectrum
+    data =
+      Enum.zip(result.wavelengths, result.absorbance)
+      |> Enum.map(fn {wl, abs} -> %{x: wl, y: abs} end)
+
+    %{
+      data: data,
+      units: %{x: "nm", y: nil},
+      metadata: %{
+        a260: result.concentration,
+        a260_a230: extra_metadata[:a260_a230],
+        a260_a280: result.ratio,
+        timestamp: extra_metadata[:timestamp],
+        assay: extra_metadata[:assay]
       }
-    end)
+    }
     |> Jason.encode!()
   end
 
@@ -130,8 +181,27 @@ defmodule Nanodrop.Graph do
 
     min_wl = 220
     max_wl = 400
-    min_abs = 0
-    max_abs = max(Enum.max(raw_abs), 0.5) * 1.1
+
+    # Calculate y-axis range from data
+    all_abs = raw_abs ++ baseline_abs
+    data_min = Enum.min(all_abs)
+    data_max = Enum.max(all_abs)
+
+    # Use actual data range for scaling
+    min_abs = data_min
+    max_abs = data_max * 1.1
+
+    # Generate y-axis ticks - labels start at 0, showing offset from minimum
+    display_range = max_abs - min_abs
+    nice_step = nice_tick_step(display_range)
+
+    # Generate ticks: 0, step, 2*step, ... up to display_range
+    y_ticks =
+      Stream.iterate(0.0, &(&1 + nice_step))
+      |> Stream.take_while(fn label -> label <= display_range * 1.01 end)
+      |> Enum.map(fn label ->
+        {Float.round(label, 2), min_abs + label}  # {display_label, actual_value}
+      end)
 
     # Scale functions
     scale_x = fn wl -> x_off + (wl - min_wl) / (max_wl - min_wl) * width end
@@ -161,7 +231,8 @@ defmodule Nanodrop.Graph do
       height: height,
       raw_path: raw_path,
       sample: result.sample,
-      overlay: overlay
+      overlay: overlay,
+      y_ticks: Enum.map(y_ticks, fn {label, actual_val} -> {label, scale_y.(actual_val)} end)
     }
   end
 
@@ -172,5 +243,19 @@ defmodule Nanodrop.Graph do
     end)
     |> Enum.join(" L ")
     |> then(&("M " <> &1))
+  end
+
+  defp nice_tick_step(range) do
+    # Aim for ~5 ticks, round to nice values (0.05, 0.1, 0.2, 0.5, etc.)
+    raw_step = range / 5
+    magnitude = :math.pow(10, :math.floor(:math.log10(raw_step)))
+    normalized = raw_step / magnitude
+
+    cond do
+      normalized <= 1.0 -> 1.0 * magnitude
+      normalized <= 2.0 -> 2.0 * magnitude
+      normalized <= 5.0 -> 5.0 * magnitude
+      true -> 10.0 * magnitude
+    end
   end
 end
