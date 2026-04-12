@@ -26,6 +26,10 @@ defmodule Nanodrop.MixProject do
   defp deps do
     [
       {:usb, "~> 0.2.1", optional: true},
+      {:vix, "~> 0.31"},
+      {:jason, "~> 1.4"},
+      {:protoss, "~> 1.1"},
+      {:nx, "~> 0.9"},
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},
       {:mox, "~> 1.0", only: :test}
     ]

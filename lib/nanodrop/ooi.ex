@@ -1,9 +1,9 @@
-defmodule Nanodrop.Protocol do
+defmodule Nanodrop.OOI do
   @moduledoc """
   Ocean Optics Interface (OOI) protocol implementation.
 
   This module implements the USB2000 command protocol for communicating
-  with NanoDrop spectrophotometers.
+  with NanoDrop spectrophotometers and defines the raw spectrum data structure.
 
   ## Command Reference
 
@@ -17,20 +17,25 @@ defmodule Nanodrop.Protocol do
   | Write Information | 0x06 | Write configuration |
   | Request Spectra | 0x09 | Trigger spectrum acquisition |
   | Set Trigger Mode | 0x0A | Set triggering mode |
+
+  ## Raw Spectrum Data
+
+  The USB2000 returns 2048 pixel values representing light intensity across
+  the detector. The wavelength for each pixel is calculated using calibration
+  coefficients stored on the device:
+
+      λ(N) = C0 + C1*N + C2*N² + C3*N³
+
+  Pixels 2-24 are "dark pixels" - optically masked for dark current subtraction.
   """
 
   alias Nanodrop.Device
-  alias Nanodrop.Spectrum
-
-  # commented out commands are not used
 
   # OOI Protocol Commands
   @cmd_initialize 0x01
   @cmd_set_integration_time 0x02
   @cmd_set_strobe_enable 0x03
-  # @cmd_set_shutdown_mode 0x04
   @cmd_query_info 0x05
-  # @cmd_write_info 0x06
   @cmd_request_spectra 0x09
   @cmd_set_trigger_mode 0x0A
 
@@ -40,16 +45,68 @@ defmodule Nanodrop.Protocol do
   @query_wavelength_coeff_1 0x02
   @query_wavelength_coeff_2 0x03
   @query_wavelength_coeff_3 0x04
-  # @query_stray_light 0x05
-  # @query_nonlinearity_coeff 0x06
   @query_config 0x0F
 
   # USB2000 specifications
   @num_pixels 2048
-  # @dark_pixel_start 2
-  # @dark_pixel_end 24
+  @dark_pixel_start 2
+  @dark_pixel_end 24
   @min_integration_time 3_000
   @max_integration_time 655_350_000
+
+  # ===========================================================================
+  # Struct Definition - Raw spectrum data from the device
+  # ===========================================================================
+
+  @type t :: %__MODULE__{
+          raw_pixels: [non_neg_integer()],
+          timestamp: DateTime.t()
+        }
+
+  defstruct raw_pixels: [],
+            timestamp: nil
+
+  @doc """
+  Creates an OOI struct from raw binary data.
+
+  The data should be 4096 bytes (2048 x 16-bit little-endian values).
+  """
+  @spec from_raw(binary()) :: t()
+  def from_raw(data) when byte_size(data) >= @num_pixels * 2 do
+    %__MODULE__{
+      raw_pixels: decode_pixels(data),
+      timestamp: DateTime.utc_now()
+    }
+  end
+
+  @doc """
+  Returns the dark pixel values (pixels 2-24).
+  """
+  @spec dark_pixels(t()) :: [non_neg_integer()]
+  def dark_pixels(%__MODULE__{raw_pixels: pixels}) do
+    Enum.slice(pixels, @dark_pixel_start, @dark_pixel_end - @dark_pixel_start + 1)
+  end
+
+  @doc """
+  Calculates the average dark pixel value.
+  """
+  @spec dark_average(t()) :: float()
+  def dark_average(%__MODULE__{} = ooi) do
+    dark = dark_pixels(ooi)
+    Enum.sum(dark) / length(dark)
+  end
+
+  @doc """
+  Returns the maximum pixel intensity.
+  """
+  @spec max_intensity(t()) :: non_neg_integer()
+  def max_intensity(%__MODULE__{raw_pixels: pixels}) do
+    Enum.max(pixels)
+  end
+
+  # ===========================================================================
+  # Protocol Commands
+  # ===========================================================================
 
   @doc """
   Initializes the spectrometer.
@@ -67,11 +124,7 @@ defmodule Nanodrop.Protocol do
   @spec set_integration_time(Device.t(), pos_integer()) :: :ok | {:error, term()}
   def set_integration_time(device, microseconds)
       when microseconds >= @min_integration_time and microseconds <= @max_integration_time do
-    # Integration time is sent as milliseconds in a 16-bit value
-    # The USB2000 uses a base time unit, formula varies by firmware
-    # Most common: value * 1000 = microseconds, so we send ms
     ms = div(microseconds, 1000)
-
     Device.send_command(device, <<@cmd_set_integration_time, ms::little-16>>)
   end
 
@@ -82,13 +135,35 @@ defmodule Nanodrop.Protocol do
   end
 
   @doc """
-  Acquires a spectrum from the device.
+  Acquires a spectrum from the device with the lamp/strobe firing.
+  Use this for blank and sample measurements.
   """
-  @spec get_spectrum(Device.t()) :: {:ok, Spectrum.t()} | {:error, term()}
+  @spec get_spectrum(Device.t()) :: {:ok, t()} | {:error, term()}
   def get_spectrum(device) do
-    with :ok <- Device.send_command(device, <<@cmd_request_spectra>>),
+    with :ok <- set_strobe_enable(device, true),
+         :ok <- strobe_warmup(),
+         :ok <- Device.send_command(device, <<@cmd_request_spectra>>),
+         {:ok, data} <- read_spectrum_data(device),
+         :ok <- set_strobe_enable(device, false) do
+      {:ok, from_raw(data)}
+    end
+  end
+
+  defp strobe_warmup do
+    Process.sleep(100)
+    :ok
+  end
+
+  @doc """
+  Acquires a dark spectrum (no lamp/strobe).
+  Use this for dark calibration to measure detector baseline.
+  """
+  @spec get_dark_spectrum(Device.t()) :: {:ok, t()} | {:error, term()}
+  def get_dark_spectrum(device) do
+    with :ok <- set_strobe_enable(device, false),
+         :ok <- Device.send_command(device, <<@cmd_request_spectra>>),
          {:ok, data} <- read_spectrum_data(device) do
-      {:ok, Spectrum.from_raw(data)}
+      {:ok, from_raw(data)}
     end
   end
 
@@ -146,12 +221,13 @@ defmodule Nanodrop.Protocol do
     Device.send_command(device, <<@cmd_set_strobe_enable, value::8>>)
   end
 
-  # Private functions
+  # ===========================================================================
+  # Private Functions
+  # ===========================================================================
 
   defp query_slot(device, slot) do
     with :ok <- Device.send_command(device, <<@cmd_query_info, slot::8>>),
          {:ok, response} <- Device.read_query(device, 64) do
-      # Response format: <<command, slot, data...>> where data is null-terminated string
       case response do
         <<@cmd_query_info, ^slot, rest::binary>> ->
           {:ok, extract_string(rest)}
@@ -163,24 +239,58 @@ defmodule Nanodrop.Protocol do
   end
 
   defp read_spectrum_data(device) do
-    # USB2000 returns spectrum as 2048 16-bit little-endian values
-    # Total: 4096 bytes, but may come in multiple packets
-    read_spectrum_packets(device, [], 0)
+    read_all_packets(device, [])
   end
 
-  defp read_spectrum_packets(device, acc, bytes_read) when bytes_read < @num_pixels * 2 do
-    case Device.read_spectrum(device, 512) do
-      {:ok, data} ->
-        read_spectrum_packets(device, [data | acc], bytes_read + byte_size(data))
+  defp read_all_packets(device, acc) do
+    case Device.read_spectrum(device, 64) do
+      {:ok, <<0x69>>} ->
+        reorder_usb2000_bytes(Enum.reverse(acc))
+
+      {:ok, data} when byte_size(data) > 0 ->
+        read_all_packets(device, [data | acc])
+
+      {:ok, <<>>} ->
+        read_all_packets(device, acc)
+
+      {:error, :timeout, _} when acc != [] ->
+        reorder_usb2000_bytes(Enum.reverse(acc))
+
+      {:error, :timeout} when acc != [] ->
+        reorder_usb2000_bytes(Enum.reverse(acc))
+
+      {:error, reason, _} ->
+        {:error, reason}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp read_spectrum_packets(_device, acc, _bytes_read) do
-    {:ok, IO.iodata_to_binary(Enum.reverse(acc))}
+  defp reorder_usb2000_bytes(packets) do
+    raw_data = IO.iodata_to_binary(packets)
+    raw_bytes = :binary.bin_to_list(raw_data)
+    n_raw = length(raw_bytes)
+
+    reordered =
+      0..(n_raw - 1)
+      |> Enum.map(fn i ->
+        new_idx = rem(div(i, 2), 64) + rem(i, 2) * 64 + div(i, 128) * 128
+        Enum.at(raw_bytes, new_idx, 0)
+      end)
+      |> :binary.list_to_bin()
+
+    {:ok, reordered}
   end
+
+  defp decode_pixels(data), do: decode_pixels(data, [])
+
+  defp decode_pixels(<<value::little-16, rest::binary>>, acc) do
+    decode_pixels(rest, [value | acc])
+  end
+
+  defp decode_pixels(<<>>, acc), do: Enum.reverse(acc)
+  defp decode_pixels(_, acc), do: Enum.reverse(acc)
 
   defp extract_string(binary) do
     binary

@@ -10,9 +10,8 @@ defmodule Nanodrop do
       # Start the server (connects to first available device)
       {:ok, pid} = Nanodrop.start_link()
 
-      # Calibrate at the start of each session
-      :ok = Nanodrop.set_dark(pid)   # Pedestal closed, no sample
-      :ok = Nanodrop.set_blank(pid)  # Water or buffer on pedestal
+      # Calibrate with water/buffer on pedestal (takes dark + blank in one shot)
+      :ok = Nanodrop.calibrate(pid)
 
       # Measure a sample (includes full spectrum in result)
       {:ok, result} = Nanodrop.measure_nucleic_acid(pid)
@@ -77,21 +76,28 @@ defmodule Nanodrop do
   use GenServer
 
   alias Nanodrop.Device
-  alias Nanodrop.Protocol
+  alias Nanodrop.OOI
   alias Nanodrop.Spectrum
 
   @default_integration_time 100_000
   @calibration_max_age_seconds 30 * 60
   @measurement_staleness_seconds 5 * 60
 
+  @type wavelength_calibration :: %{
+          intercept: float(),
+          first_coefficient: float(),
+          second_coefficient: float(),
+          third_coefficient: float()
+        }
+
   defstruct ~w[device serial_number wavelength_calibration dark blank integration_time last_measurement_at]a
 
   @typep state :: %__MODULE__{
            device: Device.t(),
            serial_number: String.t(),
-           wavelength_calibration: Spectrum.calibration(),
-           dark: Spectrum.t() | nil,
-           blank: Spectrum.t() | nil,
+           wavelength_calibration: wavelength_calibration(),
+           dark: OOI.t() | nil,
+           blank: OOI.t() | nil,
            integration_time: pos_integer(),
            last_measurement_at: DateTime.t() | nil
          }
@@ -173,6 +179,7 @@ defmodule Nanodrop do
   @spec set_integration_time(GenServer.server(), pos_integer()) :: :ok | {:error, term()}
   @spec set_dark(GenServer.server()) :: :ok | {:error, term()}
   @spec set_blank(GenServer.server()) :: :ok | {:error, term()}
+  @spec calibrate(GenServer.server()) :: :ok | {:error, term()}
   @spec calibrated?(GenServer.server()) :: boolean()
   @spec get_raw_spectrum(GenServer.server()) :: {:ok, Spectrum.t()} | {:error, term()}
   @spec get_spectrum(GenServer.server()) :: {:ok, absorbance_spectrum()} | {:error, term()}
@@ -259,7 +266,7 @@ defmodule Nanodrop do
   @spec set_integration_time_impl(pos_integer(), GenServer.from(), state()) ::
           {:reply, :ok | {:error, term()}, state()}
   defp set_integration_time_impl(microseconds, _from, state) do
-    case Protocol.set_integration_time(state.device, microseconds) do
+    case OOI.set_integration_time(state.device, microseconds) do
       :ok ->
         {:reply, :ok, %{state | integration_time: microseconds}}
 
@@ -286,13 +293,68 @@ defmodule Nanodrop do
     GenServer.call(server, {:set_spectrum, :blank})
   end
 
+  @doc """
+  Performs full calibration in one shot (dark + blank).
+
+  Call this with your reference solvent (water, buffer) on the pedestal
+  and the arm closed. This will:
+
+  1. Take a dark measurement (no lamp flash) - detector baseline
+  2. Take a blank measurement (lamp flashes) - reference through solvent
+
+  This is more efficient than calling `set_dark/1` and `set_blank/1` separately
+  since both measurements are taken with the same sample in place.
+  """
+  def calibrate(server) do
+    GenServer.call(server, :calibrate)
+  end
+
+  # Minimum blank intensity to consider calibration valid (strobe fired)
+  @min_blank_intensity 2500
+
+  @spec calibrate_impl(GenServer.from(), state()) ::
+          {:reply, :ok | {:error, term()}, state()}
+  defp calibrate_impl(_from, state) do
+    # Take dark spectrum first (no strobe), then blank (with strobe)
+    # Both measurements use the same sample in place
+    with {:ok, dark} <- OOI.get_dark_spectrum(state.device),
+         {:ok, blank} <- OOI.get_spectrum(state.device),
+         :ok <- validate_blank_intensity(blank) do
+      {:reply, :ok, %{state | dark: dark, blank: blank}}
+    else
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
+
+  defp validate_blank_intensity(blank) do
+    max_intensity = Enum.max(blank.raw_pixels)
+
+    if max_intensity >= @min_blank_intensity do
+      :ok
+    else
+      {:error, {:calibration_failed, :low_blank_intensity, max_intensity}}
+    end
+  end
+
   # implementation for both dark and blank spectrum
   @spec set_spectrum_impl(:dark | :blank, GenServer.from(), state()) ::
           {:reply, :ok | {:error, term()}, state()}
-  defp set_spectrum_impl(mode, _from, state) do
-    case Protocol.get_spectrum(state.device) do
+  defp set_spectrum_impl(:dark, _from, state) do
+    # Dark measurement: no strobe/lamp - measures detector baseline
+    case OOI.get_dark_spectrum(state.device) do
       {:ok, spectrum} ->
-        {:reply, :ok, %{state | mode => spectrum}}
+        {:reply, :ok, %{state | dark: spectrum}}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  defp set_spectrum_impl(:blank, _from, state) do
+    # Blank measurement: strobe/lamp enabled - measures through reference solvent
+    case OOI.get_spectrum(state.device) do
+      {:ok, spectrum} ->
+        {:reply, :ok, %{state | blank: spectrum}}
 
       {:error, _} = error ->
         {:reply, error, state}
@@ -321,12 +383,11 @@ defmodule Nanodrop do
   end
 
   @spec get_raw_spectrum_impl(GenServer.from(), state()) ::
-          {:reply, {:ok, Spectrum.t()} | {:error, term()}, state()}
+          {:reply, {:ok, OOI.t()} | {:error, term()}, state()}
   defp get_raw_spectrum_impl(_from, state) do
-    case Protocol.get_spectrum(state.device) do
-      {:ok, spectrum} ->
-        spectrum = Spectrum.with_calibration(spectrum, state.wavelength_calibration)
-        {:reply, {:ok, spectrum}, state}
+    case OOI.get_spectrum(state.device) do
+      {:ok, ooi} ->
+        {:reply, {:ok, ooi}, state}
 
       {:error, _} = error ->
         {:reply, error, state}
@@ -352,7 +413,7 @@ defmodule Nanodrop do
     now = DateTime.utc_now()
 
     with :ok <- check_calibration(state, now),
-         {:ok, spectrum} <- Protocol.get_spectrum(state.device) do
+         {:ok, spectrum} <- OOI.get_spectrum(state.device) do
       absorbance = calculate_absorbance_spectrum(spectrum, state)
       {:reply, {:ok, absorbance}, %{state | last_measurement_at: now}}
     else
@@ -367,8 +428,7 @@ defmodule Nanodrop do
   on a spectrum returned by `get_spectrum/1`.
   """
   def absorbance_at(spectrum, wavelength_nm) do
-    pixel = wavelength_to_pixel(wavelength_nm, spectrum.wavelengths)
-    Enum.at(spectrum.absorbance, pixel)
+    Spectrum.absorbance_at(spectrum, wavelength_nm)
   end
 
   @doc """
@@ -437,10 +497,10 @@ defmodule Nanodrop do
   # ===========================================================================
 
   defp initialize_device(device) do
-    with :ok <- Protocol.initialize(device),
-         :ok <- Protocol.set_integration_time(device, @default_integration_time),
-         {:ok, serial} <- Protocol.query_info(device, :serial_number),
-         {:ok, calibration} <- Protocol.query_info(device, :wavelength_calibration) do
+    with :ok <- OOI.initialize(device),
+         :ok <- OOI.set_integration_time(device, @default_integration_time),
+         {:ok, serial} <- OOI.query_info(device, :serial_number),
+         {:ok, calibration} <- OOI.query_info(device, :wavelength_calibration) do
       state = %__MODULE__{
         device: device,
         serial_number: serial,
@@ -487,7 +547,7 @@ defmodule Nanodrop do
     sample_pixels = sample.raw_pixels
     cal = state.wavelength_calibration
 
-    absorbance_pixels =
+    absorbance =
       [sample_pixels, dark, blank]
       |> Enum.zip()
       |> Enum.map(fn {s, d, b} ->
@@ -503,19 +563,7 @@ defmodule Nanodrop do
           cal.third_coefficient * n * n * n
       end)
 
-    %{
-      absorbance: absorbance_pixels,
-      wavelengths: wavelengths,
-      timestamp: DateTime.utc_now()
-    }
-  end
-
-  defp wavelength_to_pixel(wavelength_nm, wavelengths) do
-    # Find the pixel index closest to the target wavelength
-    wavelengths
-    |> Enum.with_index()
-    |> Enum.min_by(fn {wl, _idx} -> abs(wl - wavelength_nm) end)
-    |> elem(1)
+    Spectrum.new(wavelengths, absorbance)
   end
 
   defp safe_ratio(_a, b) when b == 0, do: nil
@@ -536,6 +584,7 @@ defmodule Nanodrop do
     do: set_integration_time_impl(us, from, state)
 
   def handle_call({:set_spectrum, mode}, from, state), do: set_spectrum_impl(mode, from, state)
+  def handle_call(:calibrate, from, state), do: calibrate_impl(from, state)
   def handle_call(:calibrated?, from, state), do: calibrated_impl(from, state)
   def handle_call(:get_raw_spectrum, from, state), do: get_raw_spectrum_impl(from, state)
   def handle_call(:get_spectrum, from, state), do: get_spectrum_impl(from, state)
