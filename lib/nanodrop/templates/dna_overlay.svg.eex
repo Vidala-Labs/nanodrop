@@ -17,23 +17,18 @@
 <text x="<%= @ctx.scale_x.(280) - 10 %>" y="<%= @ctx.y_off - 5 %>"
       class="axis" fill="green">280</text>
 
-<!-- Baseline fit (orange dashed) -->
+<!-- Baseline (turbidity, orange dashed) -->
 <path d="<%= @ctx.baseline_path %>" fill="none" stroke="orange" stroke-width="1" stroke-dasharray="4"/>
 
-<!-- Legend -->
-<line x1="<%= @ctx.x_off + 5 %>" y1="<%= @ctx.y_off + 10 %>" x2="<%= @ctx.x_off + 20 %>" y2="<%= @ctx.y_off + 10 %>" stroke="blue" stroke-width="1.5"/>
-<text x="<%= @ctx.x_off + 23 %>" y="<%= @ctx.y_off + 13 %>" class="legend">Raw</text>
+<!-- Legend (upper right) -->
+<line x1="<%= @ctx.x_off + @ctx.width - 50 %>" y1="<%= @ctx.y_off + 10 %>" x2="<%= @ctx.x_off + @ctx.width - 35 %>" y2="<%= @ctx.y_off + 10 %>" stroke="blue" stroke-width="1.5"/>
+<text x="<%= @ctx.x_off + @ctx.width - 32 %>" y="<%= @ctx.y_off + 13 %>" class="legend">Raw</text>
 
-<line x1="<%= @ctx.x_off + 5 %>" y1="<%= @ctx.y_off + 22 %>" x2="<%= @ctx.x_off + 20 %>" y2="<%= @ctx.y_off + 22 %>" stroke="orange" stroke-width="1" stroke-dasharray="4"/>
-<text x="<%= @ctx.x_off + 23 %>" y="<%= @ctx.y_off + 25 %>" class="legend">Baseline</text>
+<line x1="<%= @ctx.x_off + @ctx.width - 50 %>" y1="<%= @ctx.y_off + 22 %>" x2="<%= @ctx.x_off + @ctx.width - 35 %>" y2="<%= @ctx.y_off + 22 %>" stroke="orange" stroke-width="1" stroke-dasharray="4"/>
+<text x="<%= @ctx.x_off + @ctx.width - 32 %>" y="<%= @ctx.y_off + 25 %>" class="legend">Baseline</text>
 
-<!-- Concentration annotation -->
-<text x="<%= @ctx.x_off + div(@ctx.width, 2) %>" y="<%= @ctx.y_off + @ctx.height + 30 %>"
-      text-anchor="middle" class="label-small" fill="#666">
-  Raw: <%= Float.round(@meta.raw_concentration, 1) %> ng/µL, A260/A280 = <%= format_ratio(@meta.raw_a260_a280) %>
-</text>
-
-<text x="<%= @ctx.x_off + div(@ctx.width, 2) %>" y="<%= @ctx.y_off + @ctx.height + 45 %>"
-      text-anchor="middle" class="label" fill="blue">
-  Corrected: <%= Float.round(@meta.concentration_ng_ul, 1) %> ng/µL, A260/A280 = <%= format_ratio(@meta.a260_a280) %>
+<!-- Results annotation (one line) -->
+<text x="<%= @ctx.x_off + div(@ctx.width, 2) %>" y="<%= @ctx.y_off + @ctx.height + 35 %>"
+      text-anchor="middle" class="label">
+  <%= Float.round(@meta.concentration_ng_ul, 1) %> ng/µL, A260/280 = <%= format_ratio(@meta.a260_a280) %>, A260/230 = <%= format_ratio(@meta.a260_a230) %>
 </text>

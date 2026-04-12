@@ -3,7 +3,7 @@ defmodule Nanodrop.Mode.DNA do
   DNA/RNA measurement mode.
 
   Measures nucleic acid concentration using A260 absorbance with
-  joint Gaussian + turbidity baseline correction.
+  Rayleigh scattering turbidity baseline correction.
 
   ## Factors
 
@@ -13,13 +13,11 @@ defmodule Nanodrop.Mode.DNA do
   """
 
   defstruct factor: 50.0,
-            center: 260.0,
-            center_constraint: 10.0
+            center: 260.0
 
   @type t :: %__MODULE__{
           factor: float(),
-          center: float(),
-          center_constraint: float()
+          center: float()
         }
 
   use Nanodrop.Mode
@@ -33,11 +31,10 @@ defmodule Nanodrop.Mode.DNA do
   @impl Nanodrop.Mode
   def metadata(%__MODULE__{} = mode, spectrum) do
     alias Nanodrop.Baseline
-    alias Nanodrop.Functions.{Gaussian, Turbidity}
+    alias Nanodrop.Functions.Turbidity
 
-    # Apply joint Gaussian + turbidity baseline correction
-    {_original, corrected_spectrum, gaussian, turbidity} =
-      Baseline.correct(spectrum, center: mode.center, center_constraint: mode.center_constraint)
+    # Apply turbidity baseline correction
+    {_original, corrected_spectrum, turbidity} = Baseline.correct(spectrum)
 
     # Calculate key wavelength absorbances from corrected spectrum
     a230 = Nanodrop.Mode.absorbance_at(corrected_spectrum, 230.0)
@@ -45,15 +42,17 @@ defmodule Nanodrop.Mode.DNA do
     a280 = Nanodrop.Mode.absorbance_at(corrected_spectrum, 280.0)
     a320 = Nanodrop.Mode.absorbance_at(corrected_spectrum, 320.0)
 
-    # Also get raw values for comparison
+    # For A260/A230, use asymptotic baseline (b) only - as λ→∞, baseline→b
+    # This removes constant offset but not wavelength-dependent scattering
+    raw_a230 = Nanodrop.Mode.absorbance_at(spectrum, 230.0)
     raw_a260 = Nanodrop.Mode.absorbance_at(spectrum, 260.0)
     raw_a280 = Nanodrop.Mode.absorbance_at(spectrum, 280.0)
+    a260_asymp = raw_a260 - turbidity.b
+    a230_asymp = raw_a230 - turbidity.b
 
-    # Compute baseline and fitted curve from parameters
+    # Compute baseline from turbidity parameters
     wavelengths = spectrum.wavelengths
     baseline = Turbidity.evaluate_all(turbidity, wavelengths)
-    gaussian_curve = Gaussian.evaluate_all(gaussian, wavelengths)
-    fitted_curve = Enum.zip_with(gaussian_curve, baseline, &(&1 + &2))
 
     %{
       a230: a230,
@@ -61,17 +60,15 @@ defmodule Nanodrop.Mode.DNA do
       a280: a280,
       a320: a320,
       a260_a280: Nanodrop.Mode.safe_ratio(a260, a280),
-      a260_a230: Nanodrop.Mode.safe_ratio(a260, a230),
+      a260_a230: Nanodrop.Mode.safe_ratio(a260_asymp, a230_asymp),
       concentration_ng_ul: a260 * mode.factor,
       raw_a260: raw_a260,
       raw_a280: raw_a280,
       raw_a260_a280: Nanodrop.Mode.safe_ratio(raw_a260, raw_a280),
       raw_concentration: raw_a260 * mode.factor,
-      _gaussian: gaussian,
       _turbidity: turbidity,
       _corrected_spectrum: corrected_spectrum,
-      _baseline: baseline,
-      _fitted_curve: fitted_curve
+      _baseline: baseline
     }
   end
 

@@ -1,82 +1,47 @@
 defmodule Nanodrop.Baseline do
   @moduledoc """
-  Baseline correction using joint Gaussian + turbidity fitting.
+  Baseline correction using Rayleigh scattering turbidity model.
 
-  Fits the full spectrum to:
+  Fits turbidity baseline to:
 
-      A(λ) = amplitude * exp(-(λ - center)² / (2σ²)) + a * λ^(-n) + b
+      baseline(λ) = a·λ^(-4) + b
 
-  Where:
-  - Gaussian models the absorption peak (center constrained near 260nm for DNA)
-  - Turbidity term `a * λ^(-n) + b` models scattering/baseline
+  Using least-squares fit over two segments where peak contribution is minimal:
+  - 220-230nm (left edge)
+  - 300-400nm (right side)
 
-  Uses gradient descent optimization via Nx.
+  The corrected spectrum is simply: raw - baseline
+  A260 is read directly from the corrected spectrum.
   """
 
-  import Nx.Defn
-
-  alias Nanodrop.Functions.Gaussian
   alias Nanodrop.Functions.Turbidity
   alias Nanodrop.Spectrum
 
-  @default_center 260.0
-  @center_constraint 10.0
+  @n 4.0  # Rayleigh scattering exponent (fixed)
 
   @doc """
-  Corrects a spectrum for baseline using joint Gaussian + turbidity fit.
+  Corrects a spectrum for baseline using Rayleigh turbidity fit.
 
-  ## Options
-
-  - `:center` - Expected peak center wavelength (default: 260.0 for DNA)
-  - `:center_constraint` - How far center can move from expected (default: 10.0nm)
-  - `:learning_rate` - Gradient descent learning rate (default: 0.001)
-  - `:iterations` - Number of optimization iterations (default: 1000)
-
-  Returns a tuple of `{spectrum, corrected_spectrum, gaussian, turbidity}`:
+  Returns a tuple of `{spectrum, corrected_spectrum, turbidity}`:
   - `spectrum` - the original input spectrum
-  - `corrected_spectrum` - baseline-subtracted spectrum (turbidity removed)
-  - `gaussian` - fitted Gaussian parameters (%Gaussian{})
+  - `corrected_spectrum` - baseline-subtracted spectrum
   - `turbidity` - fitted turbidity parameters (%Turbidity{})
   """
-  @spec correct(Spectrum.t(), keyword()) :: {Spectrum.t(), Spectrum.t(), Gaussian.t(), Turbidity.t()}
-  def correct(%Spectrum{} = spectrum, opts \\ []) do
-    center = Keyword.get(opts, :center, @default_center)
-    center_constraint = Keyword.get(opts, :center_constraint, @center_constraint)
-    learning_rate = Keyword.get(opts, :learning_rate, 0.001)
-    iterations = Keyword.get(opts, :iterations, 1000)
-
+  @spec correct(Spectrum.t(), keyword()) :: {Spectrum.t(), Spectrum.t(), Turbidity.t()}
+  def correct(%Spectrum{} = spectrum, _opts \\ []) do
     wavelengths = spectrum.wavelengths
     absorbance = spectrum.absorbance
 
-    # Convert to Nx tensors
-    wl_tensor = Nx.tensor(wavelengths, type: :f32)
-    abs_tensor = Nx.tensor(absorbance, type: :f32)
+    # Fit turbidity using two segments: 220-230nm and 300-400nm
+    turbidity = fit_turbidity(wavelengths, absorbance)
 
-    # Initial parameter estimates
-    init_params = initial_params(wavelengths, absorbance, center)
-
-    # Optimize
-    final_params =
-      optimize(
-        wl_tensor,
-        abs_tensor,
-        init_params,
-        center,
-        center_constraint,
-        learning_rate,
-        iterations
-      )
-
-    # Extract results
-    %{gaussian: gaussian, turbidity: turbidity} = extract_params(final_params)
-
-    # Calculate baseline (turbidity only - what we subtract)
+    # Calculate baseline
     baseline = Turbidity.evaluate_all(turbidity, wavelengths)
 
-    # Corrected = raw - baseline (turbidity only)
+    # Corrected = raw - baseline
     corrected_absorbance =
       Enum.zip(absorbance, baseline)
-      |> Enum.map(fn {abs, bl} -> max(abs - bl, 0.0) end)
+      |> Enum.map(fn {abs, bl} -> abs - bl end)
 
     corrected_spectrum = %Spectrum{
       wavelengths: wavelengths,
@@ -84,129 +49,43 @@ defmodule Nanodrop.Baseline do
       timestamp: spectrum.timestamp
     }
 
-    {spectrum, corrected_spectrum, gaussian, turbidity}
+    {spectrum, corrected_spectrum, turbidity}
   end
 
-  defp initial_params(wavelengths, absorbance, center) do
-    # Find approximate peak
-    {peak_abs, peak_idx} =
-      absorbance
-      |> Enum.with_index()
-      |> Enum.max_by(fn {abs, _} -> abs end)
+  @doc """
+  Fits turbidity parameters using least-squares over two segments.
 
-    peak_wl = Enum.at(wavelengths, peak_idx)
+  Segments: 220-230nm and 300-400nm (away from 260nm peak)
+  Model: A(λ) = a·λ^(-4) + b
+  """
+  def fit_turbidity(wavelengths, absorbance) do
+    # Extract data points from the two segments
+    data = Enum.zip(wavelengths, absorbance)
 
-    # Estimate baseline from edges
-    edge_abs = Enum.take(absorbance, 10) ++ Enum.take(absorbance, -10)
-    baseline_estimate = Enum.sum(edge_abs) / length(edge_abs)
-
-    # Initial guesses
-    %{
-      amplitude: peak_abs - baseline_estimate,
-      center: min(max(peak_wl, center - 20), center + 20),
-      sigma: 30.0,
-      a: 1000.0,
-      n: 2.0,
-      b: baseline_estimate
-    }
-  end
-
-  defp optimize(wavelengths, absorbance, init_params, center, center_constraint, lr, iterations) do
-    # Pack parameters into tensor [amplitude, center, sigma, a, n, b]
-    params =
-      Nx.tensor(
-        [
-          init_params.amplitude,
-          init_params.center,
-          init_params.sigma,
-          init_params.a,
-          init_params.n,
-          init_params.b
-        ],
-        type: :f32
-      )
-
-    center_t = Nx.tensor(center, type: :f32)
-    constraint_t = Nx.tensor(center_constraint, type: :f32)
-    lr_t = Nx.tensor(lr, type: :f32)
-
-    # Run optimization loop
-    {final_params, _} =
-      Enum.reduce(1..iterations, {params, nil}, fn _, {p, _} ->
-        {new_p, loss} = gradient_step(wavelengths, absorbance, p, center_t, constraint_t, lr_t)
-        {new_p, loss}
+    segment_data =
+      data
+      |> Enum.filter(fn {wl, _} ->
+        (wl >= 220.0 and wl <= 230.0) or (wl >= 300.0 and wl <= 400.0)
       end)
 
-    final_params
-  end
+    # Least squares fit: A = a·λ^(-4) + b
+    # Let x = λ^(-4), then A = a·x + b
+    # This is linear regression: minimize Σ(A - a·x - b)²
 
-  defnp gradient_step(wavelengths, absorbance, params, center, constraint, lr) do
-    # Compute gradients
-    {loss, grads} =
-      value_and_grad(params, fn p ->
-        loss_fn(wavelengths, absorbance, p, center, constraint)
+    {sum_x, sum_y, sum_xx, sum_xy, n} =
+      Enum.reduce(segment_data, {0.0, 0.0, 0.0, 0.0, 0}, fn {wl, abs}, {sx, sy, sxx, sxy, count} ->
+        x = :math.pow(wl, -@n)
+        {sx + x, sy + abs, sxx + x * x, sxy + x * abs, count + 1}
       end)
 
-    # Clip gradients to prevent explosion
-    grads = Nx.clip(grads, -10.0, 10.0)
+    # Solve normal equations:
+    # a = (n·Σxy - Σx·Σy) / (n·Σx² - (Σx)²)
+    # b = (Σy - a·Σx) / n
+    denom = n * sum_xx - sum_x * sum_x
 
-    # Update parameters
-    new_params = params - lr * grads
+    a = if denom != 0.0, do: (n * sum_xy - sum_x * sum_y) / denom, else: 0.0
+    b = (sum_y - a * sum_x) / n
 
-    # Enforce constraints
-    new_params = constrain_params(new_params, center, constraint)
-
-    {new_params, loss}
-  end
-
-  defnp loss_fn(wavelengths, absorbance, params, center, constraint) do
-    predicted = model(wavelengths, params)
-    residuals = absorbance - predicted
-
-    # MSE loss
-    mse = Nx.mean(residuals * residuals)
-
-    # Soft constraint on center staying near expected
-    center_param = params[1]
-    center_penalty = Nx.pow((center_param - center) / constraint, 2) * 0.1
-
-    mse + center_penalty
-  end
-
-  defnp model(wavelengths, params) do
-    amplitude = params[0]
-    center = params[1]
-    sigma = params[2]
-    a = params[3]
-    n = params[4]
-    b = params[5]
-
-    # Gaussian peak
-    gaussian = amplitude * Nx.exp(-Nx.pow(wavelengths - center, 2) / (2 * sigma * sigma))
-
-    # Turbidity: a * λ^(-n) + b
-    turbidity = a * Nx.pow(wavelengths, -n) + b
-
-    gaussian + turbidity
-  end
-
-  defnp constrain_params(params, center, constraint) do
-    amplitude = Nx.max(params[0], 0.001)
-    center_p = Nx.clip(params[1], center - constraint, center + constraint)
-    sigma = Nx.clip(params[2], 5.0, 100.0)
-    a = Nx.max(params[3], 0.0)
-    n = Nx.clip(params[4], 0.5, 6.0)
-    b = params[5]
-
-    Nx.stack([amplitude, center_p, sigma, a, n, b])
-  end
-
-  defp extract_params(tensor) do
-    [amplitude, center, sigma, a, n, b] = Nx.to_flat_list(tensor)
-
-    %{
-      gaussian: %Gaussian{amplitude: amplitude, center: center, sigma: sigma},
-      turbidity: %Turbidity{a: a, n: n, b: b}
-    }
+    %Turbidity{a: a, n: @n, b: b}
   end
 end
