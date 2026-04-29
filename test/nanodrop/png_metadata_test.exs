@@ -16,8 +16,9 @@ defmodule Nanodrop.PngMetadataTest do
       absorbance: fixture["absorbance"],
       a260: fixture["a260"],
       a280: fixture["a280"],
-      ratio: fixture["a260_a280"],
-      concentration: fixture["concentration_ng_ul"]
+      a260_a280: fixture["a260_a280"],
+      a260_a230: fixture["a260_a230"] || 2.0,
+      concentration_ng_ul: fixture["concentration_ng_ul"]
     }
 
     {:ok, result: result, fixture: fixture}
@@ -79,7 +80,7 @@ defmodule Nanodrop.PngMetadataTest do
       assert units["y"] == nil
     end
 
-    test "metadata contains a260 concentration", %{result: result} do
+    test "metadata contains concentration", %{result: result} do
       {:ok, png_binary} = Graph.generate_png([result], %DNA{})
       {:ok, image} = Image.new_from_buffer(png_binary)
       {:ok, comment} = Image.header_value(image, "png-comment-0-Spectrum")
@@ -87,7 +88,7 @@ defmodule Nanodrop.PngMetadataTest do
       metadata_json = Jason.decode!(comment)
       meta = metadata_json["metadata"]
 
-      assert meta["a260"] == result.concentration
+      assert meta["concentration_ng_ul"] == result.concentration_ng_ul
     end
 
     test "metadata contains a260_a280 ratio", %{result: result} do
@@ -98,20 +99,18 @@ defmodule Nanodrop.PngMetadataTest do
       metadata_json = Jason.decode!(comment)
       meta = metadata_json["metadata"]
 
-      assert meta["a260_a280"] == result.ratio
+      assert meta["a260_a280"] == result.a260_a280
     end
 
-    test "metadata contains optional a260_a230 when provided", %{result: result} do
-      metadata = %{a260_a230: 2.15}
-
-      {:ok, png_binary} = Graph.generate_png([result], %DNA{}, metadata: metadata)
+    test "metadata contains a260_a230 ratio", %{result: result} do
+      {:ok, png_binary} = Graph.generate_png([result], %DNA{})
       {:ok, image} = Image.new_from_buffer(png_binary)
       {:ok, comment} = Image.header_value(image, "png-comment-0-Spectrum")
 
       metadata_json = Jason.decode!(comment)
       meta = metadata_json["metadata"]
 
-      assert meta["a260_a230"] == 2.15
+      assert meta["a260_a230"] == result.a260_a230
     end
 
     test "metadata contains timestamp when provided", %{result: result} do
@@ -141,7 +140,7 @@ defmodule Nanodrop.PngMetadataTest do
       assert meta["assay"] == "dna"
     end
 
-    test "metadata fields are nil when not provided", %{result: result} do
+    test "optional metadata fields are nil when not provided", %{result: result} do
       {:ok, png_binary} = Graph.generate_png([result], %DNA{})
       {:ok, image} = Image.new_from_buffer(png_binary)
       {:ok, comment} = Image.header_value(image, "png-comment-0-Spectrum")
@@ -149,7 +148,7 @@ defmodule Nanodrop.PngMetadataTest do
       metadata_json = Jason.decode!(comment)
       meta = metadata_json["metadata"]
 
-      assert meta["a260_a230"] == nil
+      # a260_a230 comes from result, timestamp and assay are optional extra metadata
       assert meta["timestamp"] == nil
       assert meta["assay"] == nil
     end

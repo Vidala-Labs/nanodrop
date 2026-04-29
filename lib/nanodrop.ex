@@ -75,6 +75,7 @@ defmodule Nanodrop do
 
   use GenServer
 
+  alias Nanodrop.Baseline
   alias Nanodrop.Device
   alias Nanodrop.OOI
   alias Nanodrop.Spectrum
@@ -445,20 +446,30 @@ defmodule Nanodrop do
   """
   def measure_nucleic_acid(server, opts \\ []) do
     with {:ok, spectrum} <- get_spectrum(server) do
-      a260 = absorbance_at(spectrum, 260.0)
-      a280 = absorbance_at(spectrum, 280.0)
-      a230 = absorbance_at(spectrum, 230.0)
+      # Apply baseline correction
+      {_original, corrected_spectrum, turbidity} = Baseline.correct(spectrum)
+
+      # Use corrected values for A260/A280
+      a260 = absorbance_at(corrected_spectrum, 260.0)
+      a280 = absorbance_at(corrected_spectrum, 280.0)
+
+      # For A260/A230, use only b-offset correction (not full baseline)
+      raw_a260 = absorbance_at(spectrum, 260.0)
+      raw_a230 = absorbance_at(spectrum, 230.0)
+      a260_for_230_ratio = raw_a260 - turbidity.b
+      a230_for_ratio = raw_a230 - turbidity.b
 
       factor = Keyword.get(opts, :factor, 50.0)
 
       result = %{
         a260: a260,
         a280: a280,
-        a230: a230,
         a260_a280: safe_ratio(a260, a280),
-        a260_a230: safe_ratio(a260, a230),
+        a260_a230: safe_ratio(a260_for_230_ratio, a230_for_ratio),
         concentration_ng_ul: a260 * factor,
-        spectrum: spectrum
+        spectrum: spectrum,
+        corrected_spectrum: corrected_spectrum,
+        turbidity: turbidity
       }
 
       {:ok, result}

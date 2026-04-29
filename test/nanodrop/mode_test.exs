@@ -111,7 +111,6 @@ defmodule Nanodrop.ModeTest do
 
       assert is_list(metadata._baseline)
       assert %Spectrum{} = metadata._corrected_spectrum
-      assert %Nanodrop.Functions.Gaussian{} = metadata._gaussian
       assert %Nanodrop.Functions.Turbidity{} = metadata._turbidity
     end
 

@@ -291,11 +291,12 @@ defmodule Nanodrop.ServerTest do
 
       assert Map.has_key?(result, :a260)
       assert Map.has_key?(result, :a280)
-      assert Map.has_key?(result, :a230)
       assert Map.has_key?(result, :a260_a280)
       assert Map.has_key?(result, :a260_a230)
       assert Map.has_key?(result, :concentration_ng_ul)
       assert Map.has_key?(result, :spectrum)
+      assert Map.has_key?(result, :corrected_spectrum)
+      assert Map.has_key?(result, :turbidity)
     end
 
     test "calculates concentration with custom factor" do

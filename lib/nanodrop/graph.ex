@@ -153,9 +153,9 @@ defmodule Nanodrop.Graph do
       data: data,
       units: %{x: "nm", y: nil},
       metadata: %{
-        a260: result.concentration,
-        a260_a230: extra_metadata[:a260_a230],
-        a260_a280: result.ratio,
+        concentration_ng_ul: result.concentration_ng_ul,
+        a260_a230: result.a260_a230,
+        a260_a280: result.a260_a280,
         timestamp: extra_metadata[:timestamp],
         assay: extra_metadata[:assay]
       }

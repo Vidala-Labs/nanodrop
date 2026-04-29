@@ -72,14 +72,16 @@ defmodule Mix.Tasks.Nanodrop.Measure do
       IO.puts("    A260: #{Float.round(result.a260, 3)}")
       IO.puts("    A280: #{Float.round(result.a280, 3)}")
       IO.puts("    A260/A280: #{format_ratio(result.a260_a280)}")
+      IO.puts("    A260/A230: #{format_ratio(result.a260_a230)}")
       IO.puts("    Concentration: #{Float.round(result.concentration_ng_ul, 1)} ng/uL")
 
       %{
         sample: i,
         a260: result.a260,
         a280: result.a280,
-        ratio: result.a260_a280,
-        concentration: result.concentration_ng_ul,
+        a260_a280: result.a260_a280,
+        a260_a230: result.a260_a230,
+        concentration_ng_ul: result.concentration_ng_ul,
         wavelengths: result.spectrum.wavelengths,
         absorbance: result.spectrum.absorbance
       }

@@ -4,9 +4,10 @@ defmodule Nanodrop.Baseline do
 
   Fits turbidity baseline to:
 
-      baseline(λ) = a·λ^(-4) + b
+      baseline(λ) = A / (λ + c)^4 + b
 
-  Using least-squares fit over two segments where peak contribution is minimal:
+  Using Levenberg-Marquardt nonlinear least squares over two segments
+  where peak contribution is minimal:
   - 220-230nm (left edge)
   - 300-400nm (right side)
 
@@ -15,12 +16,16 @@ defmodule Nanodrop.Baseline do
   """
 
   alias Nanodrop.Functions.Turbidity
+  alias Nanodrop.Math
   alias Nanodrop.Spectrum
-
-  @n 4.0  # Rayleigh scattering exponent (fixed)
 
   @doc """
   Corrects a spectrum for baseline using Rayleigh turbidity fit.
+
+  ## Options
+
+  - `:windows` - List of `{min, max}` wavelength ranges for fitting
+    (default: `[{220.0, 230.0}, {300.0, 400.0}]`)
 
   Returns a tuple of `{spectrum, corrected_spectrum, turbidity}`:
   - `spectrum` - the original input spectrum
@@ -28,12 +33,14 @@ defmodule Nanodrop.Baseline do
   - `turbidity` - fitted turbidity parameters (%Turbidity{})
   """
   @spec correct(Spectrum.t(), keyword()) :: {Spectrum.t(), Spectrum.t(), Turbidity.t()}
-  def correct(%Spectrum{} = spectrum, _opts \\ []) do
+  def correct(%Spectrum{} = spectrum, opts \\ []) do
+    windows = Keyword.get(opts, :windows, [{220.0, 230.0}, {300.0, 400.0}])
+
     wavelengths = spectrum.wavelengths
     absorbance = spectrum.absorbance
 
-    # Fit turbidity using two segments: 220-230nm and 300-400nm
-    turbidity = fit_turbidity(wavelengths, absorbance)
+    # Fit turbidity using specified windows
+    turbidity = fit_turbidity(wavelengths, absorbance, windows)
 
     # Calculate baseline
     baseline = Turbidity.evaluate_all(turbidity, wavelengths)
@@ -53,39 +60,53 @@ defmodule Nanodrop.Baseline do
   end
 
   @doc """
-  Fits turbidity parameters using least-squares over two segments.
+  Fits turbidity parameters using Levenberg-Marquardt over specified windows.
 
-  Segments: 220-230nm and 300-400nm (away from 260nm peak)
-  Model: A(λ) = a·λ^(-4) + b
+  Model: A(λ) = A / (λ + c)^4 + b
+
+  Parameters:
+  - A (amplitude)
+  - c (wavelength offset)
+  - b (y-offset)
   """
-  def fit_turbidity(wavelengths, absorbance) do
-    # Extract data points from the two segments
+  def fit_turbidity(wavelengths, absorbance, windows) do
+    # Extract data points from windows
     data = Enum.zip(wavelengths, absorbance)
 
-    segment_data =
+    {x_data, y_data} =
       data
-      |> Enum.filter(fn {wl, _} ->
-        (wl >= 220.0 and wl <= 230.0) or (wl >= 300.0 and wl <= 400.0)
-      end)
+      |> Enum.filter(fn {wl, _} -> in_windows?(wl, windows) end)
+      |> Enum.unzip()
 
-    # Least squares fit: A = a·λ^(-4) + b
-    # Let x = λ^(-4), then A = a·x + b
-    # This is linear regression: minimize Σ(A - a·x - b)²
+    # Model: f(λ, [A, c, b]) = A / (λ + c)^4 + b
+    model = fn lambda, [a, c, b] ->
+      a / :math.pow(lambda + c, 4) + b
+    end
 
-    {sum_x, sum_y, sum_xx, sum_xy, n} =
-      Enum.reduce(segment_data, {0.0, 0.0, 0.0, 0.0, 0}, fn {wl, abs}, {sx, sy, sxx, sxy, count} ->
-        x = :math.pow(wl, -@n)
-        {sx + x, sy + abs, sxx + x * x, sxy + x * abs, count + 1}
-      end)
+    # Jacobian: [∂f/∂A, ∂f/∂c, ∂f/∂b]
+    jacobian = fn lambda, [a, c, _b] ->
+      denom = lambda + c
+      [
+        1.0 / :math.pow(denom, 4),           # ∂f/∂A
+        -4.0 * a / :math.pow(denom, 5),      # ∂f/∂c
+        1.0                                   # ∂f/∂b
+      ]
+    end
 
-    # Solve normal equations:
-    # a = (n·Σxy - Σx·Σy) / (n·Σx² - (Σx)²)
-    # b = (Σy - a·Σx) / n
-    denom = n * sum_xx - sum_x * sum_x
+    # Initial guess (from Python: [1e9, 0, 0])
+    initial = [1.0e9, 0.0, 0.0]
 
-    a = if denom != 0.0, do: (n * sum_xy - sum_x * sum_y) / denom, else: 0.0
-    b = (sum_y - a * sum_x) / n
+    case Math.levenberg_marquardt(x_data, y_data, model, jacobian, initial) do
+      {:ok, %{params: [a, c, b]}} ->
+        %Turbidity{a: a, c: c, n: 4.0, b: b}
 
-    %Turbidity{a: a, n: @n, b: b}
+      {:error, _reason} ->
+        # Fallback to zeros if fit fails
+        %Turbidity{a: 0.0, c: 0.0, n: 4.0, b: 0.0}
+    end
+  end
+
+  defp in_windows?(wl, windows) do
+    Enum.any?(windows, fn {min, max} -> wl >= min and wl <= max end)
   end
 end

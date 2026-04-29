@@ -12,6 +12,9 @@
 
   <%= for chart <- @charts do %>
   <g>
+    <!-- Chart title -->
+    <text x="<%= chart.x_off + chart.width / 2 %>" y="<%= chart.y_off - 10 %>" text-anchor="middle" class="title">Sample <%= chart.sample %></text>
+
     <!-- Chart border -->
     <rect x="<%= chart.x_off %>" y="<%= chart.y_off %>" width="<%= chart.width %>" height="<%= chart.height %>" fill="none" stroke="#ccc"/>
 
